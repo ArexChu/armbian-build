@@ -54,7 +54,7 @@ jobs:
             BUILD_MINIMAL=no \
             KERNEL_CONFIGURE=no \
             INSTALL_HEADERS=yes \
-            COMPRESS_OUTPUTIMAGE=yes
+            COMPRESS_OUTPUTIMAGE="xz"
           
           echo "=== Build Output ==="
           ls -lh output
