@@ -1,0 +1,91 @@
+name: Build Armbian
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build Armbian Image
+    runs-on: ubuntu-24.04-arm
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Force Kernel version to 6.18
+        run: |
+          sed -i 's/KERNEL_MAJOR_MINOR=".*"/KERNEL_MAJOR_MINOR="6.18"/g' config/sources/families/sm8250.conf
+          sed -i "s/KERNELBRANCH='.*'/KERNELBRANCH='tag:v6.18.39'/g" config/sources/families/sm8250.conf
+          cat config/sources/families/sm8250.conf
+
+      - name: Inject mkbootimg fix into Docker container
+        run: |
+          mkdir -p userpatches
+          cat << 'EOF' > userpatches/lib.config
+          if [ ! -d /usr/bin/gki ]; then
+            git clone https://android.googlesource.com/platform/system/tools/mkbootimg /tmp/mkbootimg
+            cp /tmp/mkbootimg/mkbootimg.py /usr/bin/mkbootimg
+            chmod +x /usr/bin/mkbootimg
+            cp -r /tmp/mkbootimg/gki /usr/bin/
+          fi
+          EOF
+          chmod +x userpatches/lib.config
+
+      - name: Patch image-output-abl.sh to fix kernel globbing
+        run: |
+          if [ -f extensions/image-output-abl.sh ]; then
+            sed -i 's@"${new_rootfs_image_mount_dir}"/boot/vmlinuz-\*-\*@$(ls "${new_rootfs_image_mount_dir}"/boot/vmlinuz-* "${new_rootfs_image_mount_dir}"/boot/Image* 2>/dev/null | head -n 1)@g' extensions/image-output-abl.sh
+            sed -i 's@"${new_rootfs_image_mount_dir}"/boot/initrd.img-\*-\*@$(ls "${new_rootfs_image_mount_dir}"/boot/initrd.img-* 2>/dev/null | head -n 1)@g' extensions/image-output-abl.sh
+            cat extensions/image-output-abl.sh
+          fi
+
+      - name: Run Armbian Build Script
+        run: |
+          ./compile.sh \
+            BOARD=oneplus-kebab \
+            BRANCH=current \
+            RELEASE=noble \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=no \
+            KERNEL_CONFIGURE=no \
+            INSTALL_HEADERS=yes
+          
+          echo "=== Build Output ==="
+          ls -lh output
+          ls -lh output/images
+          ls -lh output/debs
+
+      - name: Check and split larger images
+        run: |
+          mkdir -p release
+          LIMIT=$((2 * 1024 * 1024 * 1024))
+          for IMG in output/images/*.img; do
+            echo "Checking: $IMG"
+            SIZE=$(stat -c%s "$IMG")
+            echo "Size: $SIZE bytes"
+            if [ "$SIZE" -gt "$LIMIT" ]; then
+              echo "Image larger, splitting..."
+              split \
+                -b 1900M \
+                -d \
+                --suffix-length=3 \
+                "$IMG" \
+                "release/$(basename "$IMG").part."
+              rm -f "$IMG"
+            else
+              echo "Image smaller, copying..."
+              cp "$IMG" release/
+            fi
+          done
+          ls -lh release
+
+      - name: Upload binary to Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            release/*.img*
+            output/debs/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
